@@ -68,7 +68,7 @@ sbatch scripts/extract_clips.sh
 ```bash
 sbatch scripts/create_subset.sh
 # Or run directly:
-# python src/data/subset_creator.py $ORGANIZED_CLIPS_DIR $SUBSET_OUTPUT_DIR $SUBSET_TOTAL_VIDEOS \
+# python src/data/create_subset_dataset.py $ORGANIZED_CLIPS_DIR $SUBSET_OUTPUT_DIR $SUBSET_TOTAL_VIDEOS \
 #     --background-prop $SUBSET_BACKGROUND_PROP \
 #     --before-goal-prop $SUBSET_BEFORE_GOAL_PROP \
 #     --free-kicks-prop $SUBSET_FREE_KICKS_PROP \
