@@ -167,7 +167,9 @@ The prediction pipeline generates:
 - Goal probability prediction and model attention weights
 
 ## Notes
-
+- Note that Bytetrack directory that is supposed to be at src/tracking can't be sent because it is too heavy, so you'll need to follow the steps here to download the repository
+https://github.com/SoccerNet/sn-tracking/tree/main/Benchmarks/ByteTrack
+and then put demo_track_mkv.py (the python script that is at the root of this project) inside the src/tracking/Bytetrack/tools/ directory
 - All the scripts automatically handle GPU allocation when available
 - The test split is excluded from the similarity search to avoid data leakage
 - The prediction results include both model-based and similarity-based goal probability estimates
