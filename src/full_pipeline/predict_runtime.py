@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""
+Runtime prediction script for soccer video analysis.
+Processes a single query video and finds similar clips using precomputed embeddings.
+Uses only train/val splits for similarity search to prevent data leakage.
+"""
 
 import os
 import sys
@@ -8,6 +13,7 @@ import json
 import time
 import random
 import shutil
+import shlex
 import numpy as np
 import h5py
 import torch
@@ -20,6 +26,9 @@ from scipy.spatial.distance import cosine
 from scipy.spatial import ConvexHull
 import threading
 import queue
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def log_message(message):
@@ -30,8 +39,9 @@ def log_message(message):
 
 def run_command(cmd, env_name=None, cwd=None):
     """Runs a command with optional conda environment activation"""
+    anaconda_path = os.getenv('ANACONDA_PATH')
     if env_name:
-        conda_cmd = f"source ~/anaconda3/etc/profile.d/conda.sh && conda activate {env_name} && {cmd}"
+        conda_cmd = f"source {anaconda_path}/etc/profile.d/conda.sh && conda activate {env_name} && {cmd}"
         full_cmd = ["bash", "-c", conda_cmd]
     else:
         full_cmd = cmd.split() if isinstance(cmd, str) else cmd
@@ -58,9 +68,10 @@ def run_command(cmd, env_name=None, cwd=None):
         return False, str(e)
 
 
-def select_random_test_clip(test_clips_dir):
+def select_random_test_clip():
     """Selects a random clip from the test set"""
-    test_dir = Path(test_clips_dir) / "test"
+    clips_dir = os.getenv('CLIPS_DATA_DIR')
+    test_dir = Path(clips_dir) / "test"
     
     if not test_dir.exists():
         raise FileNotFoundError(f"Test directory not found: {test_dir}")
@@ -86,20 +97,25 @@ def select_random_test_clip(test_clips_dir):
     return selected_video, selected_category
 
 
-def process_tracking(video_path, temp_dir, bytetrack_home, tracking_env):
+def process_tracking(video_path, temp_dir):
     """Runs ByteTrack tracking on the video"""
     log_message("Starting tracking processing...")
     
+    bytetrack_home = os.getenv('BYTETRACK_HOME')
+    tracking_env = os.getenv('TRACKING_ENV_NAME')
     tracking_output_dir = temp_dir / "tracking_results"
     tracking_output_dir.mkdir(exist_ok=True)
+    
+    escaped_video_path = shlex.quote(str(video_path))
+    escaped_output_dir = shlex.quote(str(tracking_output_dir))
     
     cmd = f"""cd {bytetrack_home} && python tools/demo_track_mkv.py video \
         -f exps/example/mot/yolox_x_soccernet.py \
         -c pretrained/bytetrack_x_mot20.tar \
         --fp16 --fuse --save_result \
         --tsize 1088 \
-        --output_dir {tracking_output_dir} \
-        --path {video_path}"""
+        --output_dir {escaped_output_dir} \
+        --path {escaped_video_path}"""
     
     success, output = run_command(cmd, env_name=tracking_env)
     
@@ -110,8 +126,8 @@ def process_tracking(video_path, temp_dir, bytetrack_home, tracking_env):
             -c pretrained/bytetrack_x_mot20.tar \
             --save_result \
             --tsize 800 \
-            --output_dir {tracking_output_dir} \
-            --path {video_path}"""
+            --output_dir {escaped_output_dir} \
+            --path {escaped_video_path}"""
         
         success, output = run_command(cmd_alt, env_name=tracking_env)
         
@@ -313,27 +329,42 @@ def calculate_correlations_inline(data):
     return np.array(correlations)
 
 
-def extract_visual_features(video_path, temp_dir, visual_script, visual_env):
-    """Extracts visual features using SlowFast"""
+def extract_visual_features(video_path, temp_dir):
+    """Extracts visual features using SlowFast with flexible pipeline script"""
     log_message("Extracting visual features...")
     
+    visual_script = os.getenv('PIPELINE_VISUAL_SCRIPT')
+    visual_env = os.getenv('VISUAL_ENV_NAME')
+    device = os.getenv('DEVICE')
     output_dir = temp_dir / "visual_features"
     output_dir.mkdir(exist_ok=True)
     
-    temp_video_dir = temp_dir / "temp_dataset" / "test" / "temp_category"
+    temp_video_dir = temp_dir / "temp_dataset"
     temp_video_dir.mkdir(parents=True, exist_ok=True)
     temp_video_path = temp_video_dir / Path(video_path).name
     shutil.copy2(video_path, temp_video_path)
     
-    cmd = f"python {visual_script} --dataset_dir {temp_dir / 'temp_dataset'} --output_dir {output_dir} --device cuda"
+    log_message(f"Video copied to: {temp_video_path}")
+    log_message(f"Using flexible visual feature extraction script")
+    
+    escaped_visual_script = shlex.quote(str(visual_script))
+    escaped_dataset_dir = shlex.quote(str(temp_dir / 'temp_dataset'))
+    escaped_output_dir = shlex.quote(str(output_dir))
+    
+    cmd = f"python {escaped_visual_script} --dataset_dir {escaped_dataset_dir} --output_dir {escaped_output_dir} --device {device}"
     
     success, output = run_command(cmd, env_name=visual_env)
     
     if not success:
+        log_message(f"Visual feature extraction command output: {output}")
         raise RuntimeError(f"Visual feature extraction failed: {output}")
     
     h5_files = list(output_dir.rglob("*.h5"))
     if not h5_files:
+        log_message(f"No .h5 files found in {output_dir}")
+        log_message("Files in output directory:")
+        for file in output_dir.rglob("*"):
+            log_message(f"  {file}")
         raise FileNotFoundError("No visual features file generated")
     
     features_file = h5_files[0]
@@ -400,23 +431,17 @@ class MultiTaskSoccerModel(nn.Module):
         return cluster_logits, goal_logits, fused, attention_weights
 
 
-def load_trained_model(model_path):
+def load_trained_model():
     """Loads the trained soccer model"""
+    model_path = os.getenv('TRAINED_MODEL_PATH')
+    
     if not Path(model_path).exists():
         raise FileNotFoundError(f"Trained model not found at: {model_path}")
     
     log_message(f"Loading trained model from: {model_path}")
     
+    model = MultiTaskSoccerModel()
     checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
-    model_config = checkpoint['model_config']
-    
-    model = MultiTaskSoccerModel(
-        visual_dim=model_config['visual_dim'],
-        crowd_dim=model_config['crowd_dim'],
-        fusion_dim=model_config['fusion_dim'],
-        num_clusters=model_config['num_clusters']
-    )
-    
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
@@ -424,10 +449,11 @@ def load_trained_model(model_path):
     return model
 
 
-def load_precomputed_embeddings(embeddings_dir):
+def load_precomputed_embeddings():
     """Loads precomputed learned embeddings for train and val splits only"""
     log_message("Loading precomputed embeddings from train and val splits...")
     
+    embeddings_dir = os.getenv('LEARNED_EMBEDDINGS_DIR')
     embeddings_path = Path(embeddings_dir)
     
     if not embeddings_path.exists():
@@ -456,11 +482,11 @@ def load_precomputed_embeddings(embeddings_dir):
     return database
 
 
-def find_similar_clips(query_crowd_features, query_visual_features, database, model_path, top_k=10):
+def find_similar_clips(query_crowd_features, query_visual_features, database, top_k=10):
     """Finds similar clips using precomputed learned embeddings"""
     log_message("Finding similar clips using precomputed embeddings...")
     
-    model = load_trained_model(model_path)
+    model = load_trained_model()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = model.to(device)
     
@@ -500,14 +526,14 @@ def find_similar_clips(query_crowd_features, query_visual_features, database, mo
     return similarities[:top_k], query_goal_prob, query_attention_weights
 
 
-def download_similar_clips(similar_clips, output_dir, clips_base_dir):
+def download_similar_clips(similar_clips, output_dir):
     """Downloads similar clips to output directory"""
     log_message("Downloading similar clips...")
     
     clips_dir = output_dir / "similar_clips"
     clips_dir.mkdir(exist_ok=True)
     
-    source_base_dir = Path(clips_base_dir)
+    source_base_dir = Path(os.getenv('CLIPS_DATA_DIR'))
     downloaded_clips = []
     
     for i, clip_info in enumerate(similar_clips):
@@ -658,21 +684,19 @@ def main():
     """Runtime prediction pipeline"""
     
     parser = argparse.ArgumentParser(description="Soccer video prediction with precomputed embeddings")
-    parser.add_argument("model_path", help="Path to trained model")
-    parser.add_argument("embeddings_dir", help="Directory containing precomputed embeddings")
-    parser.add_argument("clips_dir", help="Directory containing video clips")
-    parser.add_argument("visual_script", help="Path to visual feature extraction script")
-    parser.add_argument("bytetrack_home", help="ByteTrack home directory")
-    parser.add_argument("output_dir", help="Output directory for results")
-    parser.add_argument("--input_clip", type=str, default=None, help="Path to input video clip")
-    parser.add_argument("--top_k", type=int, default=10, help="Number of similar clips to retrieve")
-    parser.add_argument("--tracking_env", default="envsoccer", help="Conda environment for tracking")
-    parser.add_argument("--visual_env", default="envslowfast", help="Conda environment for visual features")
+    parser.add_argument("--input_clip", type=str, default=None,
+                       help="Path to input video clip")
+    parser.add_argument("--output_dir", type=str, default=None,
+                       help="Output directory for results (uses env default if not specified)")
+    parser.add_argument("--top_k", type=int, default=None,
+                       help="Number of similar clips to retrieve (uses env default if not specified)")
     
     args = parser.parse_args()
     
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else Path(os.getenv('PREDICTION_RESULTS_DIR'))
     output_dir.mkdir(parents=True, exist_ok=True)
+    
+    top_k = args.top_k if args.top_k else int(os.getenv('TOP_K_SIMILAR'))
     
     temp_dir = output_dir / "temp"
     temp_dir.mkdir(exist_ok=True)
@@ -690,7 +714,7 @@ def main():
                     query_category = cat
                     break
         else:
-            input_video, query_category = select_random_test_clip(args.clips_dir)
+            input_video, query_category = select_random_test_clip()
         
         log_message(f"Processing video: {input_video}")
         log_message(f"Query category: {query_category}")
@@ -708,7 +732,7 @@ def main():
         def tracking_worker():
             try:
                 log_message("Thread 1: Starting tracking processing...")
-                tracking_file = process_tracking(input_video, tracking_temp_dir, args.bytetrack_home, args.tracking_env)
+                tracking_file = process_tracking(input_video, tracking_temp_dir)
                 crowd_file = extract_crowd_features(tracking_file, tracking_temp_dir)
                 crowd_features_file = encode_crowd_features(crowd_file, tracking_temp_dir)
                 results_queue.put(('tracking', crowd_features_file))
@@ -718,7 +742,7 @@ def main():
         def visual_worker():
             try:
                 log_message("Thread 2: Starting visual processing...")
-                visual_features_file = extract_visual_features(input_video, visual_temp_dir, args.visual_script, args.visual_env)
+                visual_features_file = extract_visual_features(input_video, visual_temp_dir)
                 results_queue.put(('visual', visual_features_file))
             except Exception as e:
                 error_queue.put(('visual', e))
@@ -764,15 +788,15 @@ def main():
         log_message(f"Query crowd features shape: {query_crowd_features.shape}")
         log_message(f"Query visual features shape: {query_visual_features.shape}")
         
-        database = load_precomputed_embeddings(args.embeddings_dir)
+        database = load_precomputed_embeddings()
         similar_clips, query_goal_prob, query_attention = find_similar_clips(
-            query_crowd_features, query_visual_features, database, args.model_path, args.top_k
+            query_crowd_features, query_visual_features, database, top_k
         )
         
         log_message(f"Query processed - Goal probability: {query_goal_prob:.3f}")
         log_message(f"Attention weights - Visual: {query_attention[0]:.3f}, Crowd: {query_attention[1]:.3f}")
         
-        downloaded_clips = download_similar_clips(similar_clips, output_dir, args.clips_dir)
+        downloaded_clips = download_similar_clips(similar_clips, output_dir)
         
         report = generate_prediction_report(
             input_video, query_category, similar_clips, downloaded_clips, 

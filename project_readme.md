@@ -32,9 +32,8 @@ pip install -r slowfast_requirements.txt
 
 ### Configuration
 
-1. Copy `env.txt` to `.env`
-2. Modify all paths in `.env` according to your setup
-3. Set your conda environment names in `TRACKING_ENV_NAME` and `VISUAL_ENV_NAME`
+1. Modify all paths in `.env` according to your setup
+2. Set your conda environment names in `TRACKING_ENV_NAME` and `VISUAL_ENV_NAME`
 
 ## Project Structure
 
