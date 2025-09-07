@@ -81,13 +81,6 @@ sbatch scripts/create_subset.sh
 sbatch scripts/track_videos.sh
 ```
 
-**5. Extract Tracking Features**
-```bash
-sbatch scripts/extract_tracking_features.sh
-# Or run directly: 
-# python src/tracking/extract_tracking_features.py $TRACKING_OUTPUT_DIR $TRACKING_FEATURES_OUTPUT_DIR --device cuda
-```
-
 **6. Analyze Crowd Behavior**
 ```bash
 sbatch scripts/crowd_behavior_analysis.sh
